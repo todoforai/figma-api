@@ -6,7 +6,18 @@
 //   figma-api draw-* ──POST /cmd──▶  relay  ◀──GET /poll──  plugin
 //                                          ──POST /result─▶ (draws, returns ids)
 
+import { resolve } from "path";
+import { existsSync } from "fs";
+
 interface Cmd { id: string; op: string; [k: string]: unknown }
+
+/** Absolute path to the bundled plugin/manifest.json, or a clone hint if missing. */
+function manifestPath(): string {
+  const p = resolve(import.meta.dir, "..", "plugin", "manifest.json");
+  return existsSync(p)
+    ? p
+    : `${p} (missing — clone it: git clone https://github.com/todoforai/figma-api)`;
+}
 
 const queue: Cmd[] = [];
 const resultWaiters = new Map<string, (v: unknown) => void>();
@@ -79,13 +90,18 @@ export function startBridge(port: number): void {
 }
 
 /** Setup instructions shown only when a canvas-write command can't reach the plugin. */
-const SETUP = `
-To run canvas commands (create frames/text/shapes, edit variables off-Enterprise),
-the plugin bridge must be set up — the Figma REST API can't do these:
+const setup = () => `
+Canvas writes (create frames/text/shapes, edit variables off-Enterprise) aren't in
+the Figma REST API — they need the plugin bridge, which the user must install.
+
+AGENT: don't do this silently. First tell the user this grants write access to
+their Figma documents and ask if they want to install the bridge plugin. If yes,
+walk them through these steps (the plugin runs in THEIR Figma, you can't do step 2
+for them):
   1. Start the relay (keep running):   figma-api bridge
   2. In the Figma DESKTOP app: Plugins → Development → Import plugin from manifest
-     → the plugin/manifest.json shipped with this package. Run it, paste the relay
-     URL (default http://localhost:8917), click Connect.
+     → ${manifestPath()}
+     Run it, paste the relay URL (default http://localhost:8917), click Connect.
   3. Retry. Verify the round-trip with:  figma-api ping
 Cross-machine: expose the relay via 'cloudflared tunnel --url http://localhost:8917'
 and paste that https URL into the plugin. Browser-only Figma can't load dev plugins.`;
@@ -97,13 +113,13 @@ export async function sendCommand(relay: string, op: string, params: Record<stri
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ op, ...params }),
   }).catch((e) => {
-    console.error(`Bridge relay not reachable at ${relay} (${e.message}).${SETUP}`);
+    console.error(`Bridge relay not reachable at ${relay} (${e.message}).${setup()}`);
     process.exit(1);
   });
   const data = (await (res as Response).json()) as { result?: { timeout?: boolean; error?: string } };
   const result = data.result;
   if (result?.timeout) {
-    console.error(`Timed out waiting for the plugin — the relay is up but no plugin is Connected.${SETUP}`);
+    console.error(`Timed out waiting for the plugin — the relay is up but no plugin is Connected.${setup()}`);
     process.exit(1);
   }
   console.log(JSON.stringify(result ?? data, null, 2));
