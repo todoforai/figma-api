@@ -1,0 +1,22 @@
+{
+  "name": "@todoforai/figma-api",
+  "version": "1.0.0",
+  "description": "Figma CLI — full REST API wrapper (files, comments, variables, webhooks…) plus a plugin bridge for canvas writes.",
+  "type": "module",
+  "bin": {
+    "figma-api": "src/index.ts"
+  },
+  "files": ["src", "plugin", "README.md", "LICENSE"],
+  "keywords": ["figma", "figma-api", "cli", "rest", "design", "plugin", "mcp"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/todoforai/figma-api.git"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "commander": "^14.0.3"
+  }
+}
