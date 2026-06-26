@@ -78,17 +78,32 @@ export function startBridge(port: number): void {
   console.log("Point the plugin at this URL (or a cloudflared tunnel of it), then run draw-* commands.");
 }
 
+/** Setup instructions shown only when a canvas-write command can't reach the plugin. */
+const SETUP = `
+To run canvas commands (create frames/text/shapes, edit variables off-Enterprise),
+the plugin bridge must be set up — the Figma REST API can't do these:
+  1. Start the relay (keep running):   figma-api bridge
+  2. In the Figma DESKTOP app: Plugins → Development → Import plugin from manifest
+     → the plugin/manifest.json shipped with this package. Run it, paste the relay
+     URL (default http://localhost:8917), click Connect.
+  3. Retry. Verify the round-trip with:  figma-api ping
+Cross-machine: expose the relay via 'cloudflared tunnel --url http://localhost:8917'
+and paste that https URL into the plugin. Browser-only Figma can't load dev plugins.`;
+
 /** CLI helper: push a command to a running bridge and return the plugin's result. */
 export async function sendCommand(relay: string, op: string, params: Record<string, unknown>): Promise<void> {
   const res = await fetch(`${relay.replace(/\/$/, "")}/cmd`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ op, ...params }),
-  }).catch((e) => { console.error(`Bridge not reachable at ${relay}: ${e.message}\nStart it with: figma-api bridge`); process.exit(1); });
+  }).catch((e) => {
+    console.error(`Bridge relay not reachable at ${relay} (${e.message}).${SETUP}`);
+    process.exit(1);
+  });
   const data = (await (res as Response).json()) as { result?: { timeout?: boolean; error?: string } };
   const result = data.result;
   if (result?.timeout) {
-    console.error("Timed out waiting for the plugin. Is it open and Connected to the relay?");
+    console.error(`Timed out waiting for the plugin — the relay is up but no plugin is Connected.${SETUP}`);
     process.exit(1);
   }
   console.log(JSON.stringify(result ?? data, null, 2));
