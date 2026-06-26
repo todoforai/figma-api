@@ -1,0 +1,48 @@
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "plugin/**"
+      - "package.json"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Check for version bump and publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PACKAGE_NAME=$(jq -r '.name' package.json)
+          LOCAL_VERSION=$(jq -r '.version' package.json)
+          NPM_VERSION=$(npm view "$PACKAGE_NAME" version 2>/dev/null || echo "0.0.0")
+
+          # Use local version if strictly higher than npm (manual bump); else auto-patch from npm
+          HIGHER=$(printf '%s\n%s\n' "$LOCAL_VERSION" "$NPM_VERSION" | sort -V | tail -1)
+          if [ "$LOCAL_VERSION" = "$HIGHER" ] && [ "$LOCAL_VERSION" != "$NPM_VERSION" ]; then
+            NEW_VERSION="$LOCAL_VERSION"
+          else
+            NEW_VERSION=$(echo "$NPM_VERSION" | awk -F. '{print $1"."$2"."($3+1)}')
+            jq --arg v "$NEW_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
+          fi
+
+          echo "Publishing $PACKAGE_NAME@$NEW_VERSION (npm had $NPM_VERSION, local was $LOCAL_VERSION)"
+          npm publish --access public
