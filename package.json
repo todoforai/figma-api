@@ -6,7 +6,7 @@
   "bin": {
     "figma-api": "src/index.ts"
   },
-  "files": ["src", "plugin", "README.md", "LICENSE"],
+  "files": ["src", "plugin", "README.md", "AGENTS.md", "LICENSE"],
   "keywords": ["figma", "figma-api", "cli", "rest", "design", "plugin", "mcp"],
   "repository": {
     "type": "git",
