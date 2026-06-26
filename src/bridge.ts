@@ -94,10 +94,10 @@ const setup = () => `
 Canvas writes (create frames/text/shapes, edit variables off-Enterprise) aren't in
 the Figma REST API — they need the plugin bridge, which the user must install.
 
-AGENT: don't do this silently. First tell the user this grants write access to
-their Figma documents and ask if they want to install the bridge plugin. If yes,
-walk them through these steps (the plugin runs in THEIR Figma, you can't do step 2
-for them):
+AGENT: be explicit with the user about this. Explain that the bridge plugin grants
+write access to their Figma documents, confirm they want to install it, then walk
+them through these steps (the plugin runs in THEIR Figma, you can't do step 2 for
+them):
   1. Start the relay (keep running):   figma-api bridge
   2. In the Figma DESKTOP app: Plugins → Development → Import plugin from manifest
      → ${manifestPath()}
