@@ -34,6 +34,11 @@ function json(body: unknown, status = 200): Response {
 export function startBridge(port: number): void {
   Bun.serve({
     port,
+    // Bun's default idleTimeout (10s) is shorter than our 25s /poll long-poll and
+    // 30s /cmd result-wait, so it would sever those connections mid-wait — making
+    // the plugin's fetch throw ("Relay unreachable") and commands silently time
+    // out. Hold connections long enough to cover both.
+    idleTimeout: 60,
     async fetch(req) {
       const url = new URL(req.url);
       if (req.method === "OPTIONS") return json({}, 204);
