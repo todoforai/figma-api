@@ -53,33 +53,46 @@ Run `figma-api <command> --help` for parameters, scopes and examples.
 
 ## Plugin bridge — canvas writes
 
-The REST API **cannot create canvas nodes** (frames/text/shapes) or edit variables
-off-Enterprise. The Figma **Plugin API** can. The bridge lets the CLI drive a small
-companion plugin:
+The REST API **cannot create canvas nodes** (frames/text/shapes). The Figma
+**Plugin API** can. The bridge lets the CLI drive a small companion plugin over a
+WebSocket relay. It speaks the **[cursor-talk-to-figma](https://github.com/grab/cursor-talk-to-figma-mcp)
+protocol**, so the pieces are interchangeable: that ecosystem's MCP server can
+drive our plugin, and our CLI can drive theirs.
 
 ```
-figma-api run '...'  ──POST──▶  relay (figma-api bridge)  ◀──poll──  Figma plugin
-                                                          ──result─▶  (runs on canvas)
+figma-api create-frame …  ──ws──▶  relay (figma-api bridge)  ◀──ws──  Figma plugin
+                          (join channel, broadcast)          ──result─▶ (runs on canvas)
 ```
 
 Setup:
 
-1. `figma-api bridge` — start the relay (keep it running).
+1. `figma-api bridge` — start the WebSocket relay (keep it running).
 2. Figma **desktop** → Plugins → Development → **Import plugin from manifest** →
-   `plugin/manifest.json`. Run it, paste the relay URL, click **Connect**.
-3. Drive it from the CLI:
+   `plugin/manifest.json`. Run it, set URL `ws://localhost:3055` + channel
+   `figma-api`, click **Connect**.
+3. Drive it from the CLI with named commands:
 
 ```bash
 figma-api ping
-figma-api run 'const t = figma.createText(); await figma.loadFontAsync({family:"Inter",style:"Regular"}); t.characters="Hi from the CLI"; figma.currentPage.appendChild(t); return t'
+figma-api create-frame --width 320 --height 200 --fill "#1F6FEB" --name Card
+figma-api create-text "Hello" --size 24 --weight 700 --color "#111" --parent 10:5
+figma-api set-fill-color 10:5 "#FF0044"
+figma-api get-selection
+```
+
+All commands take `--relay <ws-url>` and `--channel <name>` (defaults
+`ws://localhost:3055` / `figma-api`; override via `FIGMA_RELAY` / `FIGMA_CHANNEL`).
+
+Escape hatch — for anything the named commands don't cover, `run` executes
+arbitrary Plugin API code (`figma` in scope, `await`/`return` supported):
+
+```bash
+figma-api run 'return figma.currentPage.selection.map(n => n.name)'
 figma-api run @make-card.js
 ```
 
-`run` executes arbitrary Figma Plugin API code (`figma` in scope, `await` and
-`return` supported), so it subsumes any draw/create helper.
-
-Cross-machine: `cloudflared tunnel --url http://localhost:8917` and paste that
-https URL into the plugin.
+Cross-machine: `cloudflared tunnel --url http://localhost:3055` and paste the
+`wss://` URL into the plugin.
 
 > ⚠️ **Security:** the relay has no auth and `run` executes arbitrary code in your
 > Figma document. Only use it on a trusted machine/network; don't expose the tunnel
@@ -95,7 +108,6 @@ https URL into the plugin.
 | Files / nodes / images (read) | ✅ | ✅ |
 | Comments, dev resources, webhooks | ✅ | — |
 | Create frames / text / shapes | ❌ (no endpoint) | ✅ |
-| Edit variables off-Enterprise | ❌ (403) | ✅ |
 | Works headless / CI | ✅ | needs Figma open |
 
 ## Reference
@@ -103,8 +115,8 @@ https URL into the plugin.
 - [figma/rest-api-spec](https://github.com/figma/rest-api-spec) — authoritative endpoint list.
 - [GLips/Figma-Context-MCP](https://github.com/GLips/Figma-Context-MCP) — read design-context MCP.
 - [Official Figma MCP](https://help.figma.com/hc/en-us/articles/32132100833559) — `mcp.figma.com`.
-- The bridge mirrors the architecture of community plugin bridges (e.g.
-  southleft/figma-console-mcp) but driven by a plain CLI instead of MCP.
+- [grab/cursor-talk-to-figma-mcp](https://github.com/grab/cursor-talk-to-figma-mcp) —
+  the WebSocket bridge protocol this plugin implements (interchangeable clients).
 
 ## Dev
 

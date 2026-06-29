@@ -6,9 +6,8 @@ Read this before using `figma-api`. It tells you exactly what to set up.
 
 - Need to **read** designs, or **write** comments / dev-resources / webhooks?
   → REST is enough. Just set a token (step 1). Works headless / in CI.
-- Need to **create canvas nodes** (frames, text, shapes) or **edit variables**
-  off-Enterprise? → REST can't. Use the **plugin bridge** (step 2). Requires the
-  Figma desktop app open.
+- Need to **create canvas nodes** (frames, text, shapes)? → REST can't. Use the
+  **plugin bridge** (step 2). Requires the Figma desktop app open.
 
 ## 1. Auth (always required)
 
@@ -28,46 +27,61 @@ FIGMA_TOKEN=<token> figma-api me
 - File commands accept a raw file key **or** a Figma URL; `node-id` is parsed from
   the URL automatically.
 
-## 2. Plugin bridge (only for canvas writes / variables off-Enterprise)
+## 2. Plugin bridge (only for canvas writes)
 
 The Figma REST API has **no endpoint** to create canvas nodes. The Figma Plugin
-API does. The bridge lets the CLI drive a companion plugin:
+API does. The bridge is a **WebSocket relay** that drives a companion plugin. It
+speaks the **cursor-talk-to-figma** protocol, so it's interchangeable with that
+ecosystem (their MCP server can drive our plugin and vice versa).
 
 ```
-figma-api run '<code>'  ──POST──▶  relay  ◀──poll──  Figma plugin  → runs on canvas
+figma-api create-frame …  ──ws──▶  relay  ◀──ws──  Figma plugin  → runs on canvas
+                          (join channel, broadcast)
 ```
 
 Setup (do all three, in order):
 
 1. **Start the relay** (keep it running, background it):
    ```bash
-   figma-api bridge          # listens on http://localhost:8917
+   figma-api bridge          # WebSocket relay on ws://localhost:3055
    ```
 2. **Load the plugin** — this is a human step, you cannot automate it:
    In the **Figma desktop app** (browser can't import dev plugins):
    Plugins → Development → Import plugin from manifest → pick this package's
-   `plugin/manifest.json`. Run it, paste the relay URL, click **Connect**.
-3. **Drive it**:
+   `plugin/manifest.json`. Run it, set URL `ws://localhost:3055` + channel
+   `figma-api`, click **Connect**.
+3. **Drive it** with named commands:
    ```bash
    figma-api ping            # round-trip check; prints page + selection
-   figma-api run 'const t=figma.createText(); await figma.loadFontAsync({family:"Inter",style:"Regular"}); t.characters="Hi"; figma.currentPage.appendChild(t); return t'
-   figma-api run @script.js  # or load code from a file
+   figma-api create-frame --width 320 --height 200 --fill "#1F6FEB" --name Card
+   figma-api create-text "Hi" --size 24 --parent 10:5
+   figma-api set-fill-color 10:5 "#FF0044"
+   figma-api get-selection
    ```
 
-`run` executes arbitrary Plugin API code (`figma` in scope, `await` + `return`
-supported; returned nodes come back as `{id,type,name}`). It subsumes any
-draw/create helper — prefer it over inventing new commands.
+Every canvas command takes `--relay <ws-url>` / `--channel <name>` (defaults
+`ws://localhost:3055` / `figma-api`; or `FIGMA_RELAY` / `FIGMA_CHANNEL` env).
+
+**Escape hatch:** for anything the named commands don't cover, `run` executes
+arbitrary Plugin API code (`figma` in scope, `await` + `return` supported;
+returned nodes come back as `{id,type,name}`):
+```bash
+figma-api run 'return figma.currentPage.selection.map(n => n.name)'
+figma-api run @script.js
+```
+Prefer the named `create-*`/`set-*`/`get-*` commands; reach for `run` only for
+gaps they don't fill.
 
 Cross-machine (CLI and Figma on different hosts): expose the relay publicly with
-`cloudflared tunnel --url http://localhost:8917` and paste that https URL into
+`cloudflared tunnel --url http://localhost:3055` and paste that `wss://` URL into
 the plugin instead of localhost.
 
 ## Gotchas an agent will hit
 
 - **REST `variables-modify` → 403** on non-Enterprise tokens. Don't retry; switch
-  to `figma-api run` with `figma.variables.*`.
+  to `figma-api run` with `figma.variables.*` (off-Enterprise, via the bridge).
 - **"create a frame/text/shape via REST"** is impossible — there is no endpoint.
-  Use the bridge.
+  Use the bridge (`create-frame`/`create-text`/…).
 - **Browser-only Figma can't load the dev plugin.** Needs the desktop app, or a
   published plugin. If the user is browser-only and refuses desktop, canvas
   writes are not available — say so plainly.
@@ -75,7 +89,7 @@ the plugin instead of localhost.
   user's document. Only run on a trusted machine; don't expose the tunnel URL
   publicly; don't run untrusted code.
 - The bridge handles **one command at a time, one connected plugin**. Don't fan
-  out parallel `run` calls.
+  out parallel canvas calls.
 - The CLI exits non-zero on plugin error/timeout — check exit codes.
 
 ## Quick reference
@@ -83,4 +97,7 @@ the plugin instead of localhost.
 `figma-api --help` lists every command; `figma-api <cmd> --help` has params,
 scopes and examples. Read = me/file/nodes/images/comments/components/styles/
 variables-*/dev-resources/webhooks/… Write (REST) = comment-add/reaction-add/
-variables-modify/dev-resource-*/webhook-*. Canvas write = bridge + run.
+variables-modify/dev-resource-*/webhook-*. Canvas (bridge) = create-frame/
+create-rectangle/create-text/set-fill-color/set-text/move-node/resize-node/
+clone-node/delete-node/get-selection/get-node-info/export-image/focus/select/…
++ `run` escape hatch.

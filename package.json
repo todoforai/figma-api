@@ -7,7 +7,7 @@
     "figma-api": "src/index.ts"
   },
   "files": ["src", "plugin", "README.md", "AGENTS.md", "LICENSE"],
-  "keywords": ["figma", "figma-api", "cli", "rest", "design", "plugin", "mcp"],
+  "keywords": ["figma", "figma-api", "cli", "rest", "design", "plugin", "mcp", "cursor-talk-to-figma", "websocket"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/todoforai/figma-api.git"

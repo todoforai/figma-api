@@ -8,6 +8,6 @@
   "documentAccess": "dynamic-page",
   "networkAccess": {
     "allowedDomains": ["*"],
-    "reasoning": "Long-polls the local figma-api relay to receive drawing commands from the CLI."
+    "reasoning": "Connects to the local figma-api relay over WebSocket to receive drawing commands from the CLI."
   }
 }

@@ -3,62 +3,74 @@
 <head><meta charset="utf-8" /></head>
 <body style="font:13px -apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:14px;color:#1a1a1a">
   <h3 style="margin:0 0 6px">figma-api bridge</h3>
-  <p style="margin:0 0 10px;color:#666">Connect to the relay, then drive drawing from the <code>figma-api</code> CLI.</p>
+  <p style="margin:0 0 10px;color:#666">Joins the relay's WebSocket channel, then drive it from the <code>figma-api</code> CLI (or any cursor-talk-to-figma client).</p>
 
-  <label style="display:block;margin:6px 0 2px;font-weight:600">Relay URL</label>
-  <input id="relay" value="http://localhost:8917" style="width:100%;box-sizing:border-box;padding:7px;border:1px solid #ccc;border-radius:6px" />
+  <label style="display:block;margin:6px 0 2px;font-weight:600">Relay WebSocket URL</label>
+  <input id="url" value="ws://localhost:3055" style="width:100%;box-sizing:border-box;padding:7px;border:1px solid #ccc;border-radius:6px" />
+
+  <label style="display:block;margin:8px 0 2px;font-weight:600">Channel</label>
+  <input id="channel" value="figma-api" style="width:100%;box-sizing:border-box;padding:7px;border:1px solid #ccc;border-radius:6px" />
 
   <div style="display:flex;gap:8px;margin-top:10px">
     <button id="connect" style="flex:1;padding:9px;background:#1F6FEB;color:#fff;border:0;border-radius:8px;font-weight:600;cursor:pointer">Connect</button>
-    <button id="stop" style="flex:1;padding:9px;background:#eee;color:#333;border:0;border-radius:8px;font-weight:600;cursor:pointer">Stop</button>
+    <button id="stop" style="flex:1;padding:9px;background:#eee;color:#333;border:0;border-radius:8px;font-weight:600;cursor:pointer">Disconnect</button>
   </div>
 
   <div id="status" style="margin-top:10px;color:#666;min-height:18px">Idle.</div>
-  <pre id="log" style="margin-top:8px;background:#0d1117;color:#8b949e;padding:8px;border-radius:6px;height:120px;overflow:auto;font-size:11px"></pre>
+  <pre id="log" style="margin-top:8px;background:#0d1117;color:#8b949e;padding:8px;border-radius:6px;height:110px;overflow:auto;font-size:11px"></pre>
 
   <script>
     const $ = (id) => document.getElementById(id);
-    let running = false;
     const log = (m) => { const l = $("log"); l.textContent += m + "\n"; l.scrollTop = l.scrollHeight; };
+    let socket = null, channel = null;
 
-    let resolveResult = null;
-    // plugin code → result → resolve the pending exec
+    // plugin code → command result → relay (cursor-talk-to-figma envelope)
     onmessage = (e) => {
       const m = e.data.pluginMessage;
-      if (m && m.type === "result" && resolveResult) { const r = resolveResult; resolveResult = null; r(m); }
+      if (!m || !socket || socket.readyState !== 1) return;
+      if (m.type === "command-result") {
+        log("▶ " + m.id + " ok");
+        socket.send(JSON.stringify({ id: m.id, type: "message", channel, message: { id: m.id, result: m.result } }));
+      } else if (m.type === "command-error") {
+        log("▶ " + m.id + " ✗ " + m.error);
+        socket.send(JSON.stringify({ id: m.id, type: "message", channel, message: { id: m.id, error: m.error } }));
+      }
     };
 
-    async function loop() {
-      const relay = $("relay").value.replace(/\/$/, "");
-      $("status").textContent = "🟢 Connected — polling " + relay;
-      while (running) {
-        let cmd;
-        try {
-          cmd = await (await fetch(relay + "/poll")).json();
-        } catch (_) {
-          $("status").textContent = "🔴 Relay unreachable — retrying";
-          await new Promise((res) => setTimeout(res, 1500));
-          continue;
+    function connect() {
+      const url = $("url").value.trim();
+      channel = $("channel").value.trim();
+      $("status").textContent = "Connecting to " + url + " …";
+      socket = new WebSocket(url);
+
+      socket.onopen = () => {
+        const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+        socket.send(JSON.stringify({ id, type: "join", channel }));
+        log("joining channel: " + channel);
+      };
+      socket.onmessage = (event) => {
+        let data; try { data = JSON.parse(event.data); } catch (_) { return; }
+        if (data.type === "system") {
+          const sm = data.message;
+          // structured join ack, or "Joined channel: …" — not the "please join" welcome
+          if ((sm && typeof sm === "object" && sm.result) || (typeof sm === "string" && sm.indexOf("Joined channel") === 0)) {
+            $("status").textContent = "🟢 Connected — channel: " + channel;
+          } else if (typeof sm === "string") log("· " + sm);
+          return;
         }
-        if (!cmd || !cmd.op) continue;
-        log("◀ " + cmd.op + " (" + cmd.id + ")");
-        // Run one command at a time and wait for its result (no overlap).
-        const m = await new Promise((resolve) => {
-          resolveResult = resolve;
-          parent.postMessage({ pluginMessage: { type: "exec", cmd } }, "*");
-        });
-        let bodyResult = m.result;
-        try { JSON.stringify(bodyResult); } catch (_) { bodyResult = { error: "result not serializable" }; }
-        log("▶ " + m.id + " " + JSON.stringify(bodyResult).slice(0, 60));
-        try {
-          await fetch(relay + "/result", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: m.id, result: bodyResult }) });
-        } catch (_) { log("⚠ result POST failed"); }
-      }
-      $("status").textContent = "⏹ Stopped.";
+        // commands arrive as a "broadcast" event from the other peer; data.message is the payload
+        const payload = data.message;
+        if (payload && payload.command) {
+          log("◀ " + payload.command + " (" + payload.id + ")");
+          parent.postMessage({ pluginMessage: { type: "execute-command", id: payload.id, command: payload.command, params: payload.params } }, "*");
+        }
+      };
+      socket.onclose = () => { $("status").textContent = "⏹ Disconnected."; socket = null; };
+      socket.onerror = () => { $("status").textContent = "🔴 WebSocket error — is the relay running? (figma-api bridge)"; };
     }
 
-    $("connect").onclick = () => { if (!running) { running = true; loop(); } };
-    $("stop").onclick = () => { running = false; };
+    $("connect").onclick = () => { if (!socket) connect(); };
+    $("stop").onclick = () => { if (socket) socket.close(); };
   </script>
 </body>
 </html>

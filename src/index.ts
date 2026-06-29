@@ -5,9 +5,44 @@ import {
   saveCredentials, loadCredentials,
   get, post, put, del, output, parseFigmaTarget, readJsonArg,
 } from "./api";
-import { startBridge, sendCommand } from "./bridge";
+import { startBridge, runCommand, DEFAULT_PORT, DEFAULT_CHANNEL } from "./bridge";
 
-const DEFAULT_RELAY = process.env.FIGMA_RELAY || "http://localhost:8917";
+const DEFAULT_RELAY = process.env.FIGMA_RELAY || `ws://localhost:${DEFAULT_PORT}`;
+const DEFAULT_CH = process.env.FIGMA_CHANNEL || DEFAULT_CHANNEL;
+
+/** Parse "r,g,b[,a]" (0–255 or 0–1) or "#rgb[a]" / "#rrggbb[aa]" into Figma's 0–1 {r,g,b,a}. */
+function parseColor(s: string): { r: number; g: number; b: number; a: number } {
+  if (s.startsWith("#")) {
+    let h = s.slice(1);
+    if (h.length === 3 || h.length === 4) h = h.split("").map((c) => c + c).join(""); // #rgb → #rrggbb
+    if ((h.length !== 6 && h.length !== 8) || /[^0-9a-fA-F]/.test(h)) {
+      console.error(`Invalid hex color: ${s}`); process.exit(1);
+    }
+    const n = (i: number) => parseInt(h.slice(i, i + 2), 16) / 255;
+    return { r: n(0), g: n(2), b: n(4), a: h.length === 8 ? n(6) : 1 };
+  }
+  const p = s.split(",").map(Number);
+  const bad = (p.length !== 3 && p.length !== 4) || p.some((v) => !Number.isFinite(v) || v < 0);
+  const rgb255 = p.slice(0, 3).some((v) => v > 1);
+  if (bad || p.slice(0, 3).some((v) => v > (rgb255 ? 255 : 1)) || (p[3] !== undefined && p[3] > 1)) {
+    console.error(`Invalid color: ${s} (use r,g,b[,a] as 0–1 or 0–255 RGB, alpha 0–1; or #hex)`);
+    process.exit(1);
+  }
+  const d = rgb255 ? 255 : 1;
+  return { r: p[0] / d, g: p[1] / d, b: p[2] / d, a: p[3] ?? 1 };
+}
+
+/** Common flags for every canvas command + a thin sender. */
+function canvas(name: string) {
+  return program
+    .command(name)
+    .option("--relay <url>", "relay WebSocket URL", DEFAULT_RELAY)
+    .option("--channel <name>", "relay channel", DEFAULT_CH);
+}
+const drive = (o: any, command: string, params: Record<string, unknown> = {}) =>
+  runCommand(o.relay, o.channel, command, params);
+/** Number(v) when the option is present (incl. "0"), else undefined. */
+const num = (v: unknown) => (v === undefined ? undefined : Number(v));
 
 program
   .name("figma-api")
@@ -17,9 +52,11 @@ program
     "Auth: figma-api auth <personal-access-token>   (or FIGMA_TOKEN env var)\n" +
     "Token: create at https://www.figma.com/settings → Personal access tokens\n" +
     "Most commands accept a file URL or a raw file key. node-id is read from the URL too.\n\n" +
-    "NOTE: Creating canvas layers (frames/shapes/text) is NOT in the REST API — that\n" +
-    "lives in the Figma plugin/MCP runtime. Writable here: comments, reactions,\n" +
-    "variables, dev resources and webhooks (token needs the matching write scopes)."
+    "NOTE: Creating canvas layers (frames/shapes/text) is NOT in the REST API — those\n" +
+    "go through the plugin bridge (create-frame, create-text, set-fill-color, …). It\n" +
+    "speaks the cursor-talk-to-figma WebSocket protocol, so any client in that\n" +
+    "ecosystem is interchangeable. REST-writable here: comments, reactions, variables,\n" +
+    "dev resources and webhooks (token needs the matching write scopes)."
   )
   .version("1.0.0")
   .addHelpText("after", `
@@ -589,57 +626,196 @@ program
   .action(async (url: string) => output(await get(`/v1/oembed`, { url })));
 
 // ── plugin bridge (canvas writes the REST API can't do) ───────────────────────
+// The relay + plugin speak the cursor-talk-to-figma WebSocket protocol, so these
+// commands are interchangeable with that ecosystem's MCP server / plugin.
 program
   .command("bridge")
-  .description("Start the relay that lets the figma-api CLI drive the Figma plugin (canvas writes)")
-  .option("--port <n>", "port to listen on", "8917")
+  .description("Start the WebSocket relay that lets the CLI drive the Figma plugin (canvas writes)")
+  .option("--port <n>", "port to listen on", String(DEFAULT_PORT))
   .addHelpText("after", `
-The Figma REST API cannot create canvas nodes (frames/text/shapes) or edit
-variables off-Enterprise. This relay bridges the CLI and the companion Figma
-plugin (see plugin/ folder), which can.
+The Figma REST API cannot create canvas nodes (frames/text/shapes). This relay
+bridges the CLI and the companion Figma plugin (see plugin/ folder), which can.
+It speaks the cursor-talk-to-figma WebSocket protocol — compatible with that
+ecosystem's MCP server / plugin.
 
 Flow:
   1. figma-api bridge                       # start this relay (keep running)
   2. In Figma desktop: Plugins → Development → Import plugin from manifest →
-     api-apps/figma-api/plugin/manifest.json, run it, Connect to the relay URL.
-  3. figma-api run '...'                     # CLI → relay → plugin runs it
+     plugin/manifest.json, run it, set URL ws://localhost:${DEFAULT_PORT} + channel
+     "${DEFAULT_CHANNEL}", click Connect.
+  3. figma-api ping                         # verify; then create-frame / create-text / …
 
-Cross-machine: expose the relay with 'cloudflared tunnel --url http://localhost:8917'
-and paste that https URL into the plugin's Relay field.
+Cross-machine: expose the relay with 'cloudflared tunnel --url http://localhost:${DEFAULT_PORT}'
+and paste the wss:// URL into the plugin.
 
 ⚠️  Security: the relay has no auth and 'run' executes arbitrary code in your
-Figma document. Only run it on a trusted machine/network; do not expose the
-tunnel URL publicly or run code you don't trust.`)
+Figma document. Only run it on a trusted machine/network.`)
   .action((o: any) => startBridge(Number(o.port)));
 
-program
-  .command("run <code-or-@file>")
-  .description("Run arbitrary Figma Plugin API code in the connected plugin (full canvas + variables write)")
-  .option("--relay <url>", "relay URL", DEFAULT_RELAY)
-  .addHelpText("after", `
-Whatever the Figma Plugin API can do, this can do — create frames/text/shapes,
-edit variables (no Enterprise paywall, unlike REST), read selection, etc.
-\`figma\` is in scope; you may use await and \`return\` a value (nodes come back as
-{id,type,name}).
+canvas("ping")
+  .description("Ping the connected plugin to verify the bridge round-trip")
+  .addHelpText("after", `\nReturns the plugin's current page name and selection.\nExample:\n  figma-api ping`)
+  .action((o: any) => drive(o, "ping"));
 
-Pass code inline or as @file.js. Requires a running bridge + Connected plugin.
+// ── canvas reads ──────────────────────────────────────────────────────────────
+canvas("get-document-info")
+  .description("Get the current page and its top-level children (via plugin)")
+  .action((o: any) => drive(o, "get_document_info"));
+
+canvas("get-selection")
+  .description("Get the current selection on the canvas (via plugin)")
+  .action((o: any) => drive(o, "get_selection"));
+
+canvas("get-node-info <node-id>")
+  .description("Get full info for one node (via plugin)")
+  .action((id: string, o: any) => drive(o, "get_node_info", { nodeId: id }));
+
+canvas("get-nodes-info <ids>")
+  .description("Get full info for several nodes (comma-separated ids, via plugin)")
+  .action((ids: string, o: any) => drive(o, "get_nodes_info", { nodeIds: ids.split(",") }));
+
+canvas("get-styles")
+  .description("List local paint/text/effect/grid styles (via plugin)")
+  .action((o: any) => drive(o, "get_styles"));
+
+canvas("get-components")
+  .description("List local components in the document (via plugin)")
+  .action((o: any) => drive(o, "get_local_components"));
+
+canvas("export-image <node-id>")
+  .description("Export a node as a base64 PNG (via plugin)")
+  .option("--scale <n>", "scale factor", "1")
+  .action((id: string, o: any) => drive(o, "export_node_as_image", { nodeId: id, scale: Number(o.scale) }));
+
+// ── canvas creation ───────────────────────────────────────────────────────────
+canvas("create-frame")
+  .description("Create a frame on the canvas (via plugin)")
+  .option("--x <n>", "x", "0").option("--y <n>", "y", "0")
+  .option("--width <n>", "width", "100").option("--height <n>", "height", "100")
+  .option("--name <name>", "layer name")
+  .option("--parent <id>", "parent node id (defaults to current page)")
+  .option("--fill <color>", "fill color: r,g,b[,a] or #hex")
+  .option("--stroke <color>", "stroke color: r,g,b[,a] or #hex")
+  .option("--stroke-weight <n>", "stroke weight")
+  .option("--layout <mode>", "auto layout: NONE | HORIZONTAL | VERTICAL")
+  .option("--item-spacing <n>", "item spacing (auto layout)")
+  .addHelpText("after", `\nExample:\n  figma-api create-frame --width 320 --height 200 --fill "#1F6FEB" --name Card`)
+  .action((o: any) => drive(o, "create_frame", {
+    x: Number(o.x), y: Number(o.y), width: Number(o.width), height: Number(o.height),
+    name: o.name, parentId: o.parent,
+    fillColor: o.fill ? parseColor(o.fill) : undefined,
+    strokeColor: o.stroke ? parseColor(o.stroke) : undefined,
+    strokeWeight: num(o.strokeWeight),
+    layoutMode: o.layout, itemSpacing: num(o.itemSpacing),
+  }));
+
+canvas("create-rectangle")
+  .description("Create a rectangle on the canvas (via plugin)")
+  .option("--x <n>", "x", "0").option("--y <n>", "y", "0")
+  .option("--width <n>", "width", "100").option("--height <n>", "height", "100")
+  .option("--name <name>", "layer name").option("--parent <id>", "parent node id")
+  .addHelpText("after", `\nExample:\n  figma-api create-rectangle --width 80 --height 80 --name Box`)
+  .action((o: any) => drive(o, "create_rectangle", {
+    x: Number(o.x), y: Number(o.y), width: Number(o.width), height: Number(o.height), name: o.name, parentId: o.parent,
+  }));
+
+canvas("create-text <text>")
+  .description("Create a text node on the canvas (via plugin)")
+  .option("--x <n>", "x", "0").option("--y <n>", "y", "0")
+  .option("--size <n>", "font size", "14").option("--weight <n>", "font weight (100–900)", "400")
+  .option("--color <color>", "font color: r,g,b[,a] or #hex")
+  .option("--name <name>", "layer name").option("--parent <id>", "parent node id")
+  .addHelpText("after", `\nExample:\n  figma-api create-text "Hello" --size 24 --weight 700 --color "#111"`)
+  .action((text: string, o: any) => drive(o, "create_text", {
+    text, x: Number(o.x), y: Number(o.y), fontSize: Number(o.size), fontWeight: Number(o.weight),
+    fontColor: o.color ? parseColor(o.color) : undefined, name: o.name, parentId: o.parent,
+  }));
+
+canvas("create-instance <component-key>")
+  .description("Create an instance of a published component (via plugin)")
+  .option("--x <n>", "x", "0").option("--y <n>", "y", "0").option("--parent <id>", "parent node id")
+  .action((key: string, o: any) => drive(o, "create_component_instance", { componentKey: key, x: Number(o.x), y: Number(o.y), parentId: o.parent }));
+
+// ── canvas edits ──────────────────────────────────────────────────────────────
+canvas("set-fill-color <node-id> <color>")
+  .description("Set a node's solid fill (color: r,g,b[,a] or #hex, via plugin)")
+  .action((id: string, color: string, o: any) => drive(o, "set_fill_color", { nodeId: id, color: parseColor(color) }));
+
+canvas("set-stroke-color <node-id> <color>")
+  .description("Set a node's solid stroke (via plugin)")
+  .option("--weight <n>", "stroke weight", "1")
+  .action((id: string, color: string, o: any) => drive(o, "set_stroke_color", { nodeId: id, color: parseColor(color), weight: Number(o.weight) }));
+
+canvas("set-corner-radius <node-id> <radius>")
+  .description("Set a node's corner radius (via plugin)")
+  .action((id: string, radius: string, o: any) => drive(o, "set_corner_radius", { nodeId: id, radius: Number(radius) }));
+
+canvas("set-text <node-id> <text>")
+  .description("Replace a text node's content (via plugin)")
+  .action((id: string, text: string, o: any) => drive(o, "set_text_content", { nodeId: id, text }));
+
+canvas("move-node <node-id> <x> <y>")
+  .description("Move a node to (x, y) (via plugin)")
+  .action((id: string, x: string, y: string, o: any) => drive(o, "move_node", { nodeId: id, x: Number(x), y: Number(y) }));
+
+canvas("resize-node <node-id> <width> <height>")
+  .description("Resize a node (via plugin)")
+  .action((id: string, w: string, h: string, o: any) => drive(o, "resize_node", { nodeId: id, width: Number(w), height: Number(h) }));
+
+canvas("clone-node <node-id>")
+  .description("Clone a node (via plugin)")
+  .option("--x <n>", "x of the clone").option("--y <n>", "y of the clone").option("--parent <id>", "parent node id")
+  .action((id: string, o: any) => drive(o, "clone_node", { nodeId: id, x: num(o.x), y: num(o.y), parentId: o.parent }));
+
+canvas("delete-node <node-id>")
+  .description("Delete a node (via plugin)")
+  .action((id: string, o: any) => drive(o, "delete_node", { nodeId: id }));
+
+canvas("delete-nodes <ids>")
+  .description("Delete several nodes (comma-separated ids, via plugin)")
+  .action((ids: string, o: any) => drive(o, "delete_multiple_nodes", { nodeIds: ids.split(",") }));
+
+canvas("set-layout <node-id> <mode>")
+  .description("Set auto layout mode: NONE | HORIZONTAL | VERTICAL (via plugin)")
+  .action((id: string, mode: string, o: any) => drive(o, "set_layout_mode", { nodeId: id, layoutMode: mode }));
+
+canvas("set-padding <node-id>")
+  .description("Set auto-layout padding (via plugin)")
+  .option("--top <n>").option("--right <n>").option("--bottom <n>").option("--left <n>")
+  .action((id: string, o: any) => drive(o, "set_padding", {
+    nodeId: id, paddingTop: num(o.top), paddingRight: num(o.right),
+    paddingBottom: num(o.bottom), paddingLeft: num(o.left),
+  }));
+
+canvas("set-item-spacing <node-id> <spacing>")
+  .description("Set auto-layout item spacing (via plugin)")
+  .action((id: string, s: string, o: any) => drive(o, "set_item_spacing", { nodeId: id, itemSpacing: Number(s) }));
+
+canvas("focus <node-id>")
+  .description("Select a node and zoom the viewport to it (via plugin)")
+  .action((id: string, o: any) => drive(o, "set_focus", { nodeId: id }));
+
+canvas("select <ids>")
+  .description("Set the selection (comma-separated ids) and zoom to it (via plugin)")
+  .action((ids: string, o: any) => drive(o, "set_selections", { nodeIds: ids.split(",") }));
+
+// ── escape hatch: arbitrary Plugin API code ──────────────────────────────────
+canvas("run <code-or-@file>")
+  .description("Run arbitrary Figma Plugin API code in the connected plugin (escape hatch)")
+  .addHelpText("after", `
+Whatever the Figma Plugin API can do, this can do. \`figma\` is in scope; you may
+use await and \`return\` a value (nodes come back as {id,type,name}). Prefer the
+named create-*/set-* commands; reach for 'run' only for things they don't cover.
+Pass code inline or as @file.js.
 
 ⚠️  Executes arbitrary code in your Figma document — only run code you trust.
 
 Examples:
-  figma-api run 'return figma.currentPage.selection.map(n => ({id:n.id, type:n.type, name:n.name}))'
-  figma-api run 'const t = figma.createText(); await figma.loadFontAsync({family:"Inter",style:"Regular"}); t.characters="Hi from CLI"; figma.currentPage.appendChild(t); return t'
+  figma-api run 'return figma.currentPage.selection.map(n => n.name)'
   figma-api run @make-card.js`)
-  .action(async (codeArg: string, o: any) => {
+  .action((codeArg: string, o: any) => {
     const code = codeArg.startsWith("@") ? readFileSync(codeArg.slice(1), "utf-8") : codeArg;
-    await sendCommand(o.relay, "eval", { code });
+    return drive(o, "eval", { code });
   });
-
-program
-  .command("ping")
-  .description("Ping the connected plugin to verify the bridge round-trip")
-  .option("--relay <url>", "relay URL", DEFAULT_RELAY)
-  .addHelpText("after", `\nReturns the plugin's current page name and selection.\nExample:\n  figma-api ping`)
-  .action(async (o: any) => sendCommand(o.relay, "ping", {}));
 
 program.parse();
